@@ -1,5 +1,5 @@
 import datetime
-from sqlalchemy import Column, String, Text, DateTime, Integer
+from sqlalchemy import Column, String, Text, DateTime, Integer, JSON
 from sqlalchemy.ext.declarative import declarative_base
 
 Base = declarative_base()
@@ -22,8 +22,8 @@ class ChatSession(Base):
 
 class AgentStateModel(Base):
     """
-    Dedicated table to persist the LangGraph state JSON variables 
-    (search query, analysis results) independent of the raw chat log.
+    Dedicated table to persist the LangGraph state JSON variables
+    (search query, analysis results, and QA memory) independent of the raw chat log.
     """
     __tablename__ = "agent_states"
 
@@ -32,10 +32,15 @@ class AgentStateModel(Base):
     optimized_query = Column(Text, nullable=True)
     search_results = Column(Text, nullable=True)
     analysis = Column(Text, nullable=True)
+    # ── QA Memory fields ───────────────────────────────────────────────────────
+    # qa_history: list of {"q": user_question, "a": ai_answer} dicts (full, uncompressed)
+    qa_history = Column(JSON, nullable=True, default=list)
+    # qa_summary: LLM-generated rolling summary of turns that fell outside the window
+    qa_summary = Column(Text, nullable=True, default="")
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
 
-from sqlalchemy import JSON
+
 
 class FeasibilityReport(Base):
     """

@@ -1,11 +1,12 @@
 # 🚀 Feasibility Check — AI-Powered Startup Idea Analyser
 
-An agentic, multi-step feasibility analysis system that researches your startup idea live on the web, gathers community sentiment from Reddit, and produces a structured JSON report — all powered by a **LangGraph stateful pipeline**, **OpenAI GPT-4o-mini**, and **crawl4ai**.
+An agentic, multi-step feasibility analysis system that researches your startup idea live on the web, gathers community sentiment from Reddit, and produces a structured JSON report — all powered by a **LangGraph stateful pipeline**, **Groq / OpenAI LLM**, **crawl4ai**, and a **local Qdrant RAG engine**.
 
 ![Backend](https://img.shields.io/badge/Backend-FastAPI-009688)
 ![Pipeline](https://img.shields.io/badge/Pipeline-LangGraph-blueviolet)
-![LLM](https://img.shields.io/badge/LLM-GPT--4o--mini-412991)
+![LLM](https://img.shields.io/badge/LLM-Groq%20%2F%20GPT--4o--mini-412991)
 ![DB](https://img.shields.io/badge/Database-PostgreSQL%20%2F%20Neon-4169E1)
+![Vector](https://img.shields.io/badge/VectorDB-Qdrant%20(local)-red)
 ![Frontend](https://img.shields.io/badge/Frontend-React%20%2B%20Vite-61DAFB)
 ![Search](https://img.shields.io/badge/Search-DDGS%20%2B%20crawl4ai-orange)
 
@@ -22,48 +23,88 @@ An agentic, multi-step feasibility analysis system that researches your startup 
 | **Content Quality Filtering** | Strips nav/header boilerplate; skips login walls, CAPTCHAs, and timeout pages |
 | **URL Deduplication** | All URLs from all queries are deduplicated before crawling |
 | **Structured JSON Report** | 7-field feasibility report: score, idea fit, competitors, opportunity, targeting, next step, reasoning chain |
-| **Post-Report RAG Q&A** | Chat interactively with your generated report and scraped web data using local Qdrant vectors and MiniLM embeddings |
-| **Premium Glassmorphic UI** | Dark-mode React app with a 4-step conversational state machine |
+| **Local RAG Engine** | Scraped data + report embedded via MiniLM-L6-v2 into a local Qdrant vector store |
+| **Post-Report QA Chat** | Chat interactively with your report using the RAG Q&A pipeline |
+| **QA Sliding-Window Memory** | Last 7 Q&A turns kept verbatim; older turns auto-compressed into a rolling LLM summary |
+| **Parallel Background Embedding** | Search results are embedded in a background thread while the LLM analyses concurrently |
+| **Premium Glassmorphic UI** | Dark-mode React app with a 3-step conversational state machine |
 
 ---
 
-## 🧠 Agent Pipeline Flow
+## 🧠 Main Pipeline — `POST /api/chat`
 
 ```
 POST /api/chat
      │
      ▼
-load_context_node          → reads full chat history from PostgreSQL
+load_context_node          → history pre-fetched in routes.py; node is a no-op pass-through
      │
-     ▼ (router)
- new chat?
-  ├── YES → cross_question_node    → asks 1 critical clarifying question → END
-  └── NO  → modify_query_node      → LLM generates 3 targeted JSON queries
-                 │
-                 ▼
-         web_research_node
-           ├── Query 1: "{idea} startup competitors"      → filter_urls (max 6, no reddit/quora/zhihu)
-           ├── Query 2: "{idea} existing products market" → filter_urls (max 6)
-           ├── Query 3: "{idea} Y Combinator funded"      → filter_urls (max 6)
-           └── Reddit:  "{q1} site:reddit.com"            → unfiltered (max 10)
-                 │
-           crawler_service (per URL):
-             ├── extract_core()       → keeps first 30 meaningful lines, cap 1500 chars
-             └── is_useful_content()  → skips login walls, timeouts, CAPTCHAs
-                 │
-                 ▼
-         llm_agent_node     → feasibility prompt (general + Reddit context-aware)
-                 │
-                 ▼
-         PostgreSQL upsert  (ChatSession + AgentStateModel + FeasibilityReport)
-                 │
-                 ├── (Background Thread) → text chunks → MiniLM-L6-v2 → Qdrant Vector Store
-                 │
-                 ▼
-         → frontend renders structured report
-         
-Step 3 (Optional) — POST /api/qa
-         User asks follow-up -> retriever queries Qdrant -> RAG QA Prompt -> Answer
+     ▼ (router: is_new_chat?)
+  YES → cross_question_node    → asks 1 critical clarifying question → END (200 OK)
+  NO  → modify_query_node      → LLM generates 3 targeted JSON search queries
+              │
+              ▼
+      web_research_node
+        ├── Query 1: "{idea} startup competitors"      → filter_urls (max 6)
+        ├── Query 2: "{idea} existing products market" → filter_urls (max 6)
+        ├── Query 3: "{idea} Y Combinator funded"      → filter_urls (max 6)
+        └── Reddit:  "{q1} site:reddit.com"            → unfiltered (keep reddit URLs)
+              │
+        crawler_service (async, per URL):
+          ├── extract_core()       → first 30 meaningful lines, cap 1500 chars
+          └── is_useful_content()  → rejects login walls, timeouts, CAPTCHAs
+              │
+              ▼
+      llm_agent_node
+        ├── (Background Thread) search_results → MiniLM-L6-v2 → Qdrant  ← parallel embed
+        └── feasibility prompt (general + Reddit context-aware) → LLM → JSON report
+              │
+              ▼
+      PostgreSQL upsert  (ChatSession + AgentStateModel + FeasibilityReport)
+      Background Task    (analysis text → Qdrant embed, if not already done inline)
+              │
+              ▼
+      → frontend renders structured report
+```
+
+---
+
+## 🤖 QA Pipeline — `POST /api/qa`
+
+Activated after the report is generated. Supports stateful multi-turn conversation.
+
+```
+POST /api/qa  { conversation_id, question }
+     │
+     ▼
+routes.py: load full qa_history + qa_summary from AgentStateModel (DB)
+     │
+     ▼
+[qa_load_state_node]   → logs state metadata
+     │
+     ▼
+[qa_memory_node]       ← NEW — sliding-window memory manager
+  ├── total turns ≤ 14 → clip to last 7 for prompt context (no LLM call)
+  └── total turns > 14 → LLM compresses oldest turns into rolling summary
+                          window = last 7 turns; summary updated in state
+     │
+     ▼
+[qa_modify_query_node] → rewrites follow-up question into standalone retrieval query
+     │
+     ▼
+[qa_retrieve_context_node]
+  ├── Qdrant vector similarity search (top 5 chunks)
+  └── Fallback: persisted analysis + search_results text if no vectors found
+     │
+     ▼
+[qa_generate_answer_node]
+  └── Prompt includes: summary of old turns + last 7 turns verbatim + RAG context
+     │
+     ▼
+routes.py: append new {q, a} turn to full DB list; save updated summary → db.commit()
+     │
+     ▼
+→ frontend renders answer + source chunks + trace
 ```
 
 ---
@@ -72,16 +113,16 @@ Step 3 (Optional) — POST /api/qa
 
 | Layer | Technology |
 |---|---|
-| **LLM** | OpenAI GPT-4o-mini |
+| **LLM** | Groq (primary) / OpenAI GPT-4o-mini (fallback) |
 | **Agent Orchestration** | LangGraph (StateGraph) |
 | **Web Search** | DDGS (`ddgs` package) |
 | **Web Crawler** | crawl4ai (async, headless) |
-| **Vector Database** | Qdrant (local disk collection) |
-| **Embeddings** | SentenceTransformers (`all-MiniLM-L6-v2`) |
+| **Vector Database** | Qdrant (local disk collection `feasibility_context`) |
+| **Embeddings** | SentenceTransformers `all-MiniLM-L6-v2` |
 | **Backend API** | FastAPI + Uvicorn |
 | **Database** | PostgreSQL via Neon (SQLAlchemy ORM) |
 | **Frontend** | React + Vite |
-| **Styling** | Vanilla CSS — Glassmorphic dark-mode design |
+| **Styling** | Vanilla CSS — Glassmorphic dark-mode design system |
 
 ---
 
@@ -91,34 +132,37 @@ Step 3 (Optional) — POST /api/qa
 fesebility_check/
 ├── backend/
 │   ├── api/
-│   │   ├── routes.py          # POST /chat — main entry point
+│   │   ├── routes.py          # POST /chat, POST /qa, GET /qa/graph
 │   │   └── dependencies.py    # DB session injection
 │   ├── core/
 │   │   ├── config.py          # Pydantic settings (env vars)
-│   │   ├── database.py        # SQLAlchemy engine + session
-│   │   └── llm_factory.py     # GPT-4o-mini factory
+│   │   ├── database.py        # SQLAlchemy engine + session factory
+│   │   └── llm_factory.py     # LLM factory (Groq / OpenAI)
 │   ├── models/
 │   │   └── conversation.py    # ChatSession, AgentStateModel, FeasibilityReport
 │   ├── pipeline/
-│   │   ├── graph.py           # LangGraph StateGraph definition
-│   │   ├── state.py           # AgentState TypedDict
-│   │   ├── tools.py           # All node functions
+│   │   ├── graph.py           # Main LangGraph StateGraph (/chat flow)
+│   │   ├── qa_graph.py        # QA LangGraph (5 nodes incl. qa_memory_node)
+│   │   ├── state.py           # Shared AgentState TypedDict
+│   │   ├── tools.py           # All /chat node functions
 │   │   └── prompts/
-│   │       ├── cross_question.py
-│   │       ├── qa.py              # Follow-up RAG prompt
-│   │       └── feasibility.py
+│   │       ├── cross_question.py  # Clarifying question prompt
+│   │       ├── feasibility.py     # Main 7-field JSON report prompt
+│   │       └── qa.py              # QA prompt (with memory + RAG context)
 │   ├── rag/
 │   │   ├── embedder.py        # SentenceTransformers chunking & Qdrant upsert
-│   │   └── retriever.py       # Context search logic
+│   │   └── retriever.py       # Qdrant similarity search → context string + chunks
 │   ├── scraper/
 │   │   └── web.py             # ddgs_url_scrapper, extract_core,
 │   │                          # filter_urls, is_useful_content, crawler_service
+│   ├── qdrant_data/           # Local Qdrant persistence (gitignored in prod)
 │   ├── app.py                 # FastAPI app + CORS + router mount
 │   ├── main.py                # Uvicorn entrypoint + DB init lifespan
 │   └── requirements.txt
 └── frontend/
     └── src/
         ├── App.jsx            # 3-step state machine (initial → cross_question → report)
+        │                      # Fixed: conversation_id race condition in React state
         ├── index.css          # Design system (glassmorphic dark mode)
         └── main.jsx
 ```
@@ -127,11 +171,34 @@ fesebility_check/
 
 ## 🗄️ Database Schema
 
-| Table | Purpose |
-|---|---|
-| `chat_sessions` | Every human/AI turn with idea, problem, customer context |
-| `agent_states` | Persists `optimized_query`, `search_results`, `analysis` per conversation |
-| `feasibility_reports` | Structured JSON fields: score, idea_fit, competitors, opportunity, targeting, next_step, chain_of_thought |
+| Table | Column | Purpose |
+|---|---|---|
+| `chat_sessions` | all | Every human/AI turn with idea, problem, customer context |
+| `agent_states` | `optimized_query` | Last LLM-generated search query string |
+| | `search_results` | Raw scraped web text |
+| | `analysis` | Final feasibility JSON string |
+| | `qa_history` | JSON list of all `{q, a}` QA turns (full, uncompressed) |
+| | `qa_summary` | LLM rolling summary of turns older than the 7-turn window |
+| `feasibility_reports` | all | Parsed structured fields: score, idea_fit, competitors, opportunity, targeting, next_step, chain_of_thought |
+
+---
+
+## 🔑 QA Memory Design
+
+```
+DB: qa_history = [{q, a}, {q, a}, ... N turns]   ← full history, never trimmed in DB
+DB: qa_summary = "..."                             ← rolling LLM summary of old turns
+
+Each /api/qa call:
+  1. Load full qa_history from DB → pass to graph
+  2. qa_memory_node:
+       if N <= 14 → use last 7 as context window (no LLM)
+       if N  > 14 → LLM compresses turns[:-7] → new qa_summary; window = turns[-7:]
+  3. Prompt = summary (if any) + window + RAG context + question
+  4. Save: qa_history.append({q, a}); qa_summary = new_summary
+```
+
+This means the prompt context is **always bounded** regardless of how long the session runs.
 
 ---
 
@@ -140,14 +207,14 @@ fesebility_check/
 ### 1. Clone & Configure
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/narayan0910/fesebility_check.git
 cd fesebility_check
 ```
 
 Create `backend/.env`:
 
 ```env
-OPENAI_API_KEY=your_openai_key_here
+OPENAI_API_KEY=your_openai_key_here        # or GROQ_API_KEY if using Groq
 POSTGRES_URL=postgresql://user:password@host/dbname?sslmode=require
 ```
 
@@ -162,6 +229,9 @@ python main.py
 ```
 
 Backend runs at → **http://localhost:8000**
+
+> On first startup, `main.py` auto-creates all DB tables (including the new
+> `qa_history` and `qa_summary` columns added to `agent_states`).
 
 ### 3. Frontend Setup
 
@@ -179,18 +249,23 @@ Frontend runs at → **http://localhost:5173** (proxies `/api` to backend)
 
 ```
 Step 1 — Initial Form
-  User fills: Idea Name, Name, Ideal Customer, Problem Statement
+  User fills: Idea Name, Your Name, Ideal Customer, Problem Statement
   → Agent asks ONE clarifying question
 
 Step 2 — Cross Question
   User answers the clarifying question
-  → Agent runs full web research pipeline
+  → Agent runs full web research pipeline (15-30 sec)
   → Returns structured feasibility report
 
 Step 3 — Report Dashboard
   Displays: Score, Idea Fit, Market Opportunity,
             Competitor Landscape, Targeting, Next Step,
             Agent Reasoning Chain
+
+  + QA Chat (post-report):
+      Ask unlimited follow-up questions grounded in your
+      scraped research data. Memory window: 7 turns verbatim
+      + rolling LLM summary of older turns.
 ```
 
 ---

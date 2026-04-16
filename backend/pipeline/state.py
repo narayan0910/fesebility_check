@@ -28,3 +28,6 @@ class AgentState(TypedDict):
     top_chunks: NotRequired[List[dict]]
     qa_answer: NotRequired[str]
     trace: NotRequired[List[dict]]
+    # ── QA Memory (sliding window + LLM summary) ─────────────────────────────
+    qa_history: NotRequired[List[dict]]   # full list of {"q": ..., "a": ...} turns
+    qa_summary: NotRequired[str]          # LLM-compressed summary of older turns

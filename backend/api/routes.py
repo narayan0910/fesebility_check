@@ -174,57 +174,84 @@ async def chat_endpoint(
 async def qa_endpoint(input_data: QaInput, db: Session = Depends(get_db)):
     """
     RAG-backed Q&A for follow-up questions about the feasibility report.
+    Maintains a server-side sliding-window memory (last 7 turns verbatim +
+    LLM-compressed rolling summary of older turns).
     """
     conv_id = input_data.conversation_id
     question = input_data.question
-    
-    # Check if persisted state exists for this conversation
+
+    # ── Load persisted state ───────────────────────────────────────────────────
     state_model = db.query(AgentStateModel).filter(AgentStateModel.conversation_id == conv_id).first()
     if not state_model:
         return QaResponse(answer="Could not find a feasibility report for this idea.")
-         
-    # History
-    history_dicts = []
-    sessions = db.query(ChatSession).filter(ChatSession.conversation_id == conv_id).order_by(ChatSession.timestamp.asc()).all()
-    for s in sessions:
-        history_dicts.append({"user": s.human_message, "ai": s.ai_message})
+
+    sessions = db.query(ChatSession).filter(
+        ChatSession.conversation_id == conv_id
+    ).order_by(ChatSession.timestamp.asc()).all()
 
     if not sessions:
         return QaResponse(answer="Could not find chat history for this conversation.")
-         
+
+    history_dicts = [{"user": s.human_message, "ai": s.ai_message} for s in sessions]
+
+    # Full QA turn list from DB (uncompressed — routes.py is the source of truth)
+    full_qa_history: list[dict] = state_model.qa_history or []
+    qa_summary: str = state_model.qa_summary or ""
+
+    answer = ""
+    chunks: list[dict] = []
+    trace: list[dict] = []
+
     try:
-        # Build QA state with the SAME shared keys as /chat plus QA-specific fields.
         first = sessions[0]
         initial_state = {
-            "idea": first.idea or "your startup idea",
-            "user_name": first.user_name or "",
-            "ideal_customer": first.ideal_customer or "",
-            "problem_solved": first.what_problem_it_solves or "",
-            "messages": [],
-            "search_results": state_model.search_results or "",
-            "analysis": state_model.analysis or "",
-            "is_new_chat": False,
-            "conversation_id": conv_id,
+            "idea":               first.idea or "your startup idea",
+            "user_name":          first.user_name or "",
+            "ideal_customer":     first.ideal_customer or "",
+            "problem_solved":     first.what_problem_it_solves or "",
+            "messages":           [],
+            "search_results":     state_model.search_results or "",
+            "analysis":           state_model.analysis or "",
+            "is_new_chat":        False,
+            "conversation_id":    conv_id,
             "conversation_history": history_dicts,
-            "optimized_query": state_model.optimized_query or "",
-            "optimized_queries": [],
-            "current_message": question,
-            "question": question,
-            "rag_context": "",
-            "top_chunks": [],
-            "qa_answer": "",
-            "trace": [],
+            "optimized_query":    state_model.optimized_query or "",
+            "optimized_queries":  [],
+            "current_message":    question,
+            "question":           question,
+            "rag_context":        "",
+            "top_chunks":         [],
+            "qa_answer":          "",
+            "trace":              [],
+            # ── QA memory ──────────────────────────────────────────────────────
+            # Pass the FULL uncompressed list; qa_memory_node handles windowing.
+            "qa_history":         full_qa_history,
+            "qa_summary":         qa_summary,
         }
 
         result = await qa_langgraph_app.ainvoke(initial_state)
         answer = result.get("qa_answer") or "I couldn't generate an answer right now."
         chunks = result.get("top_chunks", [])
-        trace = result.get("trace", [])
+        trace  = result.get("trace", [])
+
+        # ── Persist updated memory ─────────────────────────────────────────────
+        # Append the new turn to the FULL list (not the windowed result slice).
+        new_full_history = full_qa_history + [{"q": question, "a": answer}]
+        state_model.qa_history = new_full_history
+        # qa_summary may have been updated by qa_memory_node (compression path).
+        state_model.qa_summary = result.get("qa_summary", qa_summary)
+        db.commit()
+
+        logging.info(
+            f"[QA Memory] conv={conv_id} total_turns={len(new_full_history)} "
+            f"summary_len={len(state_model.qa_summary or '')}"
+        )
+
     except Exception as e:
         logging.error(f"Error during QA LLM call: {e}")
         answer = "I'm sorry, I encountered an error while trying to answer your question."
         chunks = []
-        trace = [{"step": "qa_error", "message": str(e)}]
+        trace  = [{"step": "qa_error", "message": str(e)}]
 
     return QaResponse(answer=answer, top_chunks=chunks, trace=trace)
 
