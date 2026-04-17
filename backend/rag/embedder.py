@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+from pathlib import Path
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # Try to get the logger, if not, it will be standard
@@ -9,21 +10,20 @@ logger = logging.getLogger(__name__)
 # Lazy initialization so the app doesn't crash if imported before pip install
 embedder = None
 qdrant_client = None
-QDRANT_PATH = "./qdrant_data"
+QDRANT_PATH = str(Path(__file__).resolve().parent.parent / "qdrant_data")
 COLLECTION_NAME = "feasibility_context"
+EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "all-MiniLM-L6-v2")
+EMBEDDING_LOCAL_FILES_ONLY = os.getenv("EMBEDDING_LOCAL_FILES_ONLY", "").lower() in {"1", "true", "yes"}
 
-def _init_qdrant():
+def _init_qdrant(load_embedder: bool = True):
     global embedder, qdrant_client
     if qdrant_client is None:
         try:
             from qdrant_client import QdrantClient
             from qdrant_client.models import VectorParams, Distance
-            from sentence_transformers import SentenceTransformer
-            
-            # This will download the model weights the first time it is run
-            embedder = SentenceTransformer("all-MiniLM-L6-v2")
+
             qdrant_client = QdrantClient(path=QDRANT_PATH)
-            
+
             if not qdrant_client.collection_exists(COLLECTION_NAME):
                 qdrant_client.create_collection(
                     collection_name=COLLECTION_NAME,
@@ -33,13 +33,37 @@ def _init_qdrant():
             logger.error(f"Failed to initialize Qdrant/SentenceTransformers. Please install requirements: {e}")
             raise
 
+    if load_embedder and embedder is None:
+        try:
+            from sentence_transformers import SentenceTransformer
+
+            # This will download the model weights the first time it is run
+            embedder = SentenceTransformer(
+                EMBEDDING_MODEL_NAME,
+                local_files_only=EMBEDDING_LOCAL_FILES_ONLY,
+            )
+        except ImportError as e:
+            logger.error(f"Failed to initialize Qdrant/SentenceTransformers. Please install requirements: {e}")
+            raise
+
+
+def close_qdrant():
+    global qdrant_client
+    if qdrant_client is not None:
+        try:
+            qdrant_client.close()
+        except Exception as e:
+            logger.warning(f"Failed to close Qdrant client cleanly: {e}")
+        finally:
+            qdrant_client = None
+
 def embed_conversation_context(conversation_id: str, search_results: str, analysis: str):
     """
     Chunks the search results and the final analysis, embeds them using MiniLM-L6-v2, 
     and inserts them into local Qdrant collection under the given conversation_id.
     """
     try:
-        _init_qdrant()
+        _init_qdrant(load_embedder=True)
     except ImportError:
         logger.warning("Skipping embedding because required dependencies are not installed.")
         return
@@ -104,10 +128,11 @@ def embed_conversation_context(conversation_id: str, search_results: str, analys
         
         qdrant_client.upsert(
             collection_name=COLLECTION_NAME,
-            points=points
+            points=points,
+            wait=True
         )
         logger.info(f"Successfully embedded {len(points)} chunks for conversation {conversation_id}")
-        print(f"  [RAG] ✅ Successfully uploaded {len(points)} chunks to Qdrant for Session {conversation_id[:8]}...\n")
+        print(f"  [RAG] ✅ Successfully uploaded {len(points)} chunks to Qdrant for Session {conversation_id}...\n")
     except Exception as e:
         logger.error(f"Error embedding context: {e}")
         print(f"  [RAG] ❌ Failed to embed context: {e}")

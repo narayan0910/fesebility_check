@@ -15,7 +15,7 @@ from langgraph.graph import StateGraph, START, END
 
 from pipeline.state import AgentState
 from pipeline.prompts.qa import get_qa_prompt
-from rag.retriever import retrieve_context
+from rag.retriever import conversation_chunk_count, retrieve_context
 from core.llm_factory import get_llm
 
 
@@ -183,8 +183,16 @@ def qa_retrieve_context_node(state: AgentState) -> dict:
 
     print(f"  [QA] Original question: {question}")
     print(f"  [QA] Retrieval query : {retrieval_query}")
+    print(f"  [QA] Searching Qdrant for conv_id: {conv_id}")
 
-    context, chunks = retrieve_context(conversation_id=conv_id, query=retrieval_query, top_k=5)
+    chunk_count = conversation_chunk_count(conv_id)
+    print(f"  [QA] Persisted chunk count for conv_id {conv_id}: {chunk_count}")
+
+    if chunk_count > 0:
+        context, chunks = retrieve_context(conversation_id=conv_id, query=retrieval_query, top_k=5)
+    else:
+        context, chunks = "No relevant context found.", []
+        print("  [QA] No persisted chunks found for this conversation before retrieval.")
 
     if not chunks:
         fallback_context = (
@@ -201,6 +209,7 @@ def qa_retrieve_context_node(state: AgentState) -> dict:
         {
             "question": question,
             "retrieval_query": retrieval_query,
+            "persisted_chunk_count": chunk_count,
             "top_chunks": len(chunks),
             "used_fallback": len(chunks) == 0,
         },
