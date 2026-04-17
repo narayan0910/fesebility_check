@@ -1,14 +1,13 @@
 import uvicorn
 import os
+import threading
 from contextlib import asynccontextmanager
 
 from core.database import init_db
 from app import app
 
 
-@asynccontextmanager
-async def lifespan(_app):
-    # ── Startup ───────────────────────────────────────────────────────────────
+def _initialize_database():
     print("Starting up... initializing database")
     try:
         from core.database import engine
@@ -19,7 +18,13 @@ async def lifespan(_app):
     except Exception as e:
         print(f"❌ ERROR: Failed to connect to or initialize the database. Please check your POSTGRES_URL.")
         print(f"Details: {e}")
-        
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    # ── Startup ───────────────────────────────────────────────────────────────
+    threading.Thread(target=_initialize_database, daemon=True).start()
+
     preload_rag = os.getenv("PRELOAD_RAG_ON_STARTUP", "").lower() in {"1", "true", "yes"}
     if preload_rag:
         print("Starting up RAG embedding models...")
