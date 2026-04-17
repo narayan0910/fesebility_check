@@ -47,6 +47,7 @@ class QaResponse(BaseModel):
     trace: Optional[list[dict]] = None
 
 
+
 @router.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(
     input_data: IdeaInput,

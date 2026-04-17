@@ -45,10 +45,13 @@ async def lifespan(_app):
 app.router.lifespan_context = lifespan
 
 if __name__ == "__main__":
+    port = int(os.getenv("PORT", "8000"))
+    reload_enabled = os.getenv("UVICORN_RELOAD", "").lower() in {"1", "true", "yes"}
+
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8000,
-        reload=True,
+        port=port,
+        reload=reload_enabled,
         log_level="info",
     )

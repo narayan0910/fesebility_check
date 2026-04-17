@@ -2,15 +2,16 @@ fastapi
 uvicorn
 langgraph
 langchain-google-genai
+langchain-openai
 google-api-python-client
 sqlalchemy
 psycopg2-binary
 pydantic
+pydantic-settings
 python-dotenv
 langchain
 langchain-community
 aiofiles
-langchain-groq
 requests
 beautifulsoup4
 ddgs
