@@ -12,7 +12,7 @@ embedder = None
 qdrant_client = None
 QDRANT_PATH = str(Path(__file__).resolve().parent.parent / "qdrant_data")
 COLLECTION_NAME = "feasibility_context"
-EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "all-MiniLM-L6-v2")
+EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-small-en-v1.5")
 EMBEDDING_LOCAL_FILES_ONLY = os.getenv("EMBEDDING_LOCAL_FILES_ONLY", "").lower() in {"1", "true", "yes"}
 
 def _init_qdrant(load_embedder: bool = True):
@@ -35,14 +35,13 @@ def _init_qdrant(load_embedder: bool = True):
 
     if load_embedder and embedder is None:
         try:
-            from sentence_transformers import SentenceTransformer
+            from fastembed import TextEmbedding
 
-            # This will download the model weights the first time it is run
-            embedder = SentenceTransformer(
-                EMBEDDING_MODEL_NAME
-            )
-        except ImportError as e:
-            logger.error(f"Failed to initialize Qdrant/SentenceTransformers. Please install requirements: {e}")
+            # fastembed is lighter than sentence-transformers and keeps our
+            # default embedding size aligned with the 384-dim Qdrant collection.
+            embedder = TextEmbedding(model_name=EMBEDDING_MODEL_NAME)
+        except Exception as e:
+            logger.error(f"Failed to initialize fastembed: {e}")
             raise
 
 
@@ -115,7 +114,7 @@ def embed_conversation_context(conversation_id: str, search_results: str, analys
         from qdrant_client.models import PointStruct
         import uuid
         
-        vectors = embedder.encode(texts)
+        vectors = list(embedder.embed(texts))
         points = [
             PointStruct(
                 id=str(uuid.uuid4()),

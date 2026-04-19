@@ -257,6 +257,80 @@ async def qa_endpoint(input_data: QaInput, db: Session = Depends(get_db)):
     return QaResponse(answer=answer, top_chunks=chunks, trace=trace)
 
 
+@router.get("/history")
+async def get_history(author_id: Optional[str] = None, db: Session = Depends(get_db)):
+    """
+    Return one entry per conversation for the history sidebar.
+    The list is filtered by author_id to avoid leaking other users' history.
+    """
+    if not author_id:
+        return []
+
+    from sqlalchemy import func
+
+    subquery = (
+        db.query(
+            ChatSession.conversation_id,
+            func.min(ChatSession.timestamp).label("min_ts"),
+        )
+        .filter(ChatSession.authorId == author_id)
+        .group_by(ChatSession.conversation_id)
+        .subquery()
+    )
+
+    sessions = (
+        db.query(ChatSession)
+        .join(
+            subquery,
+            (ChatSession.conversation_id == subquery.c.conversation_id)
+            & (ChatSession.timestamp == subquery.c.min_ts),
+        )
+        .order_by(ChatSession.timestamp.desc())
+        .all()
+    )
+
+    return [
+        {
+            "conversation_id": session.conversation_id,
+            "idea": session.idea,
+            "timestamp": session.timestamp,
+            "user_name": session.user_name,
+        }
+        for session in sessions
+    ]
+
+
+@router.get("/history/{conversation_id}")
+async def get_conversation_details(conversation_id: str, db: Session = Depends(get_db)):
+    """
+    Return the stored report and QA history for a specific conversation.
+    """
+    state_model = (
+        db.query(AgentStateModel)
+        .filter(AgentStateModel.conversation_id == conversation_id)
+        .first()
+    )
+    first_session = (
+        db.query(ChatSession)
+        .filter(ChatSession.conversation_id == conversation_id)
+        .order_by(ChatSession.timestamp.asc())
+        .first()
+    )
+
+    if not state_model or not first_session:
+        return {"error": "Conversation not found"}
+
+    return {
+        "conversation_id": conversation_id,
+        "idea": first_session.idea,
+        "user_name": first_session.user_name,
+        "ideal_customer": first_session.ideal_customer,
+        "problem_solved": first_session.what_problem_it_solves,
+        "analysis": state_model.analysis,
+        "qa_history": state_model.qa_history or [],
+    }
+
+
 @router.get("/qa/graph")
 async def qa_graph_endpoint():
     """

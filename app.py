@@ -1,5 +1,9 @@
-from fastapi import FastAPI
+import sys
+import traceback
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from api.routes import router
 
 app = FastAPI(
@@ -7,6 +11,17 @@ app = FastAPI(
     description="AI-powered startup feasibility analysis using LangGraph & OpenAI",
     version="1.0.0",
 )
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    print("--- INTERNAL SERVER ERROR ---")
+    traceback.print_exc(file=sys.stdout)
+    return JSONResponse(
+        status_code=500,
+        content={"message": "Internal Server Error"},
+    )
+
 
 # ── CORS Middleware ───────────────────────────────────────────────────────────
 app.add_middleware(

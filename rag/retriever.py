@@ -88,7 +88,7 @@ def retrieve_context(conversation_id: str, query: str, top_k: int = 5) -> tuple[
 
         embedder_mod._init_qdrant(load_embedder=True)
 
-        query_vector = embedder_mod.embedder.encode(query).tolist()
+        query_vector = next(embedder_mod.embedder.embed([query])).tolist()
 
         print(f"  [RAG] Executing Qdrant search for conversation_id={conversation_id}...")
         search_result = _run_similarity_search(query_vector, conversation_id, top_k)
