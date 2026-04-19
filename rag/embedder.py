@@ -39,8 +39,7 @@ def _init_qdrant(load_embedder: bool = True):
 
             # This will download the model weights the first time it is run
             embedder = SentenceTransformer(
-                EMBEDDING_MODEL_NAME,
-                local_files_only=EMBEDDING_LOCAL_FILES_ONLY,
+                EMBEDDING_MODEL_NAME
             )
         except ImportError as e:
             logger.error(f"Failed to initialize Qdrant/SentenceTransformers. Please install requirements: {e}")
