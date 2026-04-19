@@ -1,0 +1,26 @@
+services:
+  # Backend Web Service
+  - type: web
+    name: feasibility-backend
+    env: docker
+    dockerfilePath: Dockerfile
+    dockerContext: .
+    plan: free
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: GROQ_API_KEY
+        sync: false
+      - key: POSTGRES_URL
+        sync: false
+
+  # Frontend Static Site
+  - type: web
+    name: feasibility-frontend
+    env: static
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_BASE
+        value: https://feasibility-backend.onrender.com/api
